@@ -10,21 +10,22 @@
     hashes and lets the user know for any indications of compromise (IoC).
 
     Author     : Bennur, Suraj.
-    Version    : 1.0
+    Version    : 2.0
 """
-import sys
-import json
-import time
 import logging
 import argparse
-import requests
+import pandas as pd
+import joblib
+from dotenv import load_dotenv
+from pathlib import Path
+import tldextract
+from urllib.parse import urlparse
 
-from os.path import join
+from src.email_analyzer import analyze_email_source
+from src.scanners import scan_hash_with_virustotal, scan_url_with_sucuri, scan_url_with_virustotal, check_url_with_phishtank
+from src.utils import extract_features
 
-from email_analyzer import analyze_email_source
-from scanners import scan_hash_with_virustotal
-from ai_reporter import generate_ai_report
-
+load_dotenv()
 
 # Default to INFO; can be switched to DEBUG with --verbose flag
 logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.INFO)
@@ -34,193 +35,173 @@ SUCURI_BASE_API_URL = "https://sitecheck.sucuri.net/results"
 
 URL_SCAN_API_BASE_URL = "https://urlscan.io/api/v1/"
 
+ML_MODEL_PATH = Path(__file__).parent.parent / "phishing_model.joblib"
+ML_FEATURES_PATH = Path(__file__).parent.parent / "model_features.joblib"
+
 
 class ThreatAware:
     """Class that computes potential risks of the given input
     and displays evidence in the form of indicators of compromise
     """
     def __init__(self, urls=None, url_scan_key="",
-                 virus_total_key="", ip_addrs=None,
+                 virus_total_key="", phishtank_api_key="", ip_addrs=None,
                  hashes=None, gemini_api_key=None):
         self.urls = urls if urls else []
         self.ip_addrs = ip_addrs if ip_addrs else []
         self.hashes = hashes if hashes else []
         self.url_scan_key = url_scan_key
         self.virus_total_key = virus_total_key
+        self.phishtank_api_key = phishtank_api_key
         self.gemini_api_key = gemini_api_key
         self.scan_results = {"urls": [], "hashes": []}
+        self.model = None
+        self.model_features = None
+        self._load_model()
+
+    def _load_model(self):
+        """Loads the trained model and feature list."""
+        try:
+            self.model = joblib.load(ML_MODEL_PATH)
+            self.model_features = joblib.load(ML_FEATURES_PATH)
+            LOGGER.info("Phishing detection model loaded successfully.")
+        except FileNotFoundError:
+            self.model = None
+            self.model_features = None
+            LOGGER.warning("Phishing model not found. Running without ML detection.")
+
+    def predict_phishing(self, url):
+        """Predicts if a URL is a phishing attempt."""
+        if not self.model:
+            return {"prediction": "error", "reason": "Model not loaded"}
+
+        features_dict = extract_features(url)
+        if not features_dict:
+            return {"prediction": "error", "reason": "Could not extract features from URL"}
+
+        # Ensure the feature order matches the model's training order
+        features_df = pd.DataFrame([features_dict])
+        features_df = features_df[self.model_features] # Reorder columns
+        
+        raw_probability = float(self.model.predict_proba(features_df)[0][1])  # Probability of being phishing
+        adjusted_probability = self._adjust_probability_with_heuristics(url, features_dict, raw_probability)
+
+        prediction_label = "phishing" if adjusted_probability >= 0.50 else "benign"
+
+        return {
+            "prediction": prediction_label,
+            "probability": f"{adjusted_probability:.2%}",
+            "raw_probability": f"{raw_probability:.2%}"
+        }
+
+    def _adjust_probability_with_heuristics(self, url: str, features: dict, probability: float) -> float:
+        """Apply conservative safety heuristics to reduce false positives for clean personal domains.
+
+        This does NOT whitelist any domain. It applies narrow bonuses for:
+        - Clean bare domains: alphabetic 6-15 chars, no subdomain, no sensitive words, root path.
+        - Clean alphabetic subdomains 6-15 chars on root path, no sensitive words.
+        """
+        try:
+            extracted = tldextract.extract(url)
+            domain = extracted.domain or ""
+            subdomain = extracted.subdomain or ""
+            # Normalize common 'www' prefix for heuristic purposes
+            effective_subdomain = "" if subdomain in ("", "www") else subdomain
+            suffix = extracted.suffix or ""
+            parsed = urlparse(url)
+
+            # Basic guards from features
+            sensitive = int(features.get("sensitive_words_count", 0) or 0)
+            is_ip = int(features.get("is_ip_address", 0) or 0)
+            path_depth = int(features.get("path_depth", 0) or 0)
+            abnormality = float(features.get("subdomain_abnormality", 0) or 0)
+
+            # Allowed common TLDs for personal sites (non-exhaustive)
+            common_tlds = {"com", "net", "org", "dev", "io", "app", "me"}
+
+            adjusted = float(probability)
+
+            # Clean bare personal domain (no subdomain), short alphabetic name, root path, no sensitive words
+            if ((not effective_subdomain)
+                and domain.isalpha()
+                and 6 <= len(domain) <= 15
+                and sensitive == 0
+                and is_ip == 0
+                and path_depth == 0
+                and (suffix.split('.')[-1] in common_tlds)
+                and abnormality <= 0):
+                adjusted = max(0.0, adjusted - 0.60)
+
+            # Clean alphabetic subdomain case (e.g., personal-name on a platform), root path, no sensitive words
+            clean_sub = effective_subdomain.replace('-', '').replace('_', '')
+            if effective_subdomain and clean_sub.isalpha() and 6 <= len(clean_sub) <= 15 and sensitive == 0 and path_depth == 0 and abnormality <= 0:
+                adjusted = max(0.0, adjusted - 0.50)
+
+            # Clamp to [0,1]
+            adjusted = min(max(adjusted, 0.0), 1.0)
+            return adjusted
+        except Exception:
+            return float(probability)
 
     def scan_urls(self):
         """Scan a given list of URLs."""
         if not self.urls:
             return
 
-        LOGGER.info(f"Scanning {len(self.urls)} URL(s)...")
-        LOGGER.info("Checking with SecUri (https://sitecheck.sucuri.net) "
-                    "through UrlScan.io (http://urlscan.io)")
-        LOGGER.info("Please wait, this may take a few moments...\n")
+        LOGGER.info(f"--- Scanning {len(self.urls)} URL(s) ---")
         for url in self.urls:
-            self._scan_single_url(url)
+            url_report = {"url": url}
+            LOGGER.info(f"Analyzing URL: {url}")
 
-    def _scan_single_url(self, url):
-        """Helper method to scan one URL."""
-        final_url = self._construct_sucuri_url(url)
-        uuid = self._post_submission_api(final_url)
-        if uuid:
-            result = self._get_result_api(uuid)
-            if result:
-                self._process_url_output(url, result)
+            # 1. Local Phishing Prediction
+            ml_result = self.predict_phishing(url)
+            url_report['ml_prediction'] = ml_result
+            LOGGER.info(f"  -> ML Prediction: {ml_result['prediction']} ({ml_result.get('probability', 'N/A')})")
 
-    def scan_hashes(self, hashes_to_scan):
-        """Scan a given list of file hashes with VirusTotal."""
-        if not self.virus_total_key:
-            LOGGER.warning("VirusTotal API key not provided. Skipping hash scans.")
+            # 2. Sucuri URL Scan
+            if self.url_scan_key:
+                sucuri_results = scan_url_with_sucuri(url, self.url_scan_key)
+                if sucuri_results:
+                    url_report["sucuri"] = sucuri_results
+
+            # 3. VirusTotal URL Scan
+            if self.virus_total_key:
+                vt_results = scan_url_with_virustotal(url, self.virus_total_key)
+                if vt_results:
+                    url_report["virustotal"] = vt_results
+
+            # 4. PhishTank URL Scan
+            if self.phishtank_api_key:
+                pt_results = check_url_with_phishtank(url, self.phishtank_api_key)
+                if pt_results:
+                    url_report["phishtank"] = pt_results
+
+            self.scan_results["urls"].append(url_report)
+
+    def scan_hashes(self):
+        """Scan a given list of hashes."""
+        if not self.hashes:
             return
 
-        if not hashes_to_scan:
-            return
+        LOGGER.info(f"--- Scanning {len(self.hashes)} Hash(es) ---")
+        for file_hash in self.hashes:
+            hash_report = {"hash": file_hash}
+            LOGGER.info(f"Analyzing Hash: {file_hash}")
 
-        LOGGER.info(f"\nScanning {len(hashes_to_scan)} file hash(es) with VirusTotal...")
-        for item in hashes_to_scan:
-            filename = item.get('filename', 'N/A')
-            file_hash = item.get('sha256')
-
-            if not file_hash:
-                continue
-
-            LOGGER.info(f"Scanning: {filename} ({file_hash[:10]}...)")
-            scan_result = scan_hash_with_virustotal(file_hash, self.virus_total_key)
+            # 1. VirusTotal Hash Scan
+            if self.virus_total_key:
+                LOGGER.info("  -> Checking with VirusTotal...")
+                vt_results = scan_hash_with_virustotal(file_hash, self.virus_total_key)
+                if vt_results:
+                    hash_report["virustotal"] = vt_results
             
-            result_to_store = {
-                "filename": filename,
-                "hash": file_hash,
-                "scan_result": scan_result
-            }
-            self.scan_results["hashes"].append(result_to_store)
+            self.scan_results["hashes"].append(hash_report)
 
-            if "error" in scan_result:
-                LOGGER.error(f"  -> Could not scan {filename}: {scan_result['error']}")
-            else:
-                if scan_result.get('malicious', 0) > 0 or scan_result.get('suspicious', 0) > 0:
-                    LOGGER.warning(f"  -> Possible threat detected in {filename}!")
-                else:
-                    LOGGER.info(f"  -> No threats detected for {filename}.")
+
 
     def scan_inputs(self):
         """Scan the inputs provided during initialization."""
         self.scan_urls()
-        # Adapt the hash list to the format expected by scan_hashes
-        if self.hashes:
-            hashes_as_dict = [{'filename': h, 'sha256': h} for h in self.hashes]
-            self.scan_hashes(hashes_as_dict)
-
-
-    @staticmethod
-    def _construct_sucuri_url(url):
-        """Construct the final url to sucuri.
-
-        :param url: Given actual url => 'http://www.google.com'
-        :return: string representation of the final sucuri url
-        => https://sitecheck.sucuri.net/results/www/google/com
-        """
-        url_list = [_.strip(":") for _ in url.split("/") if _ != ""]
-        url_list.remove("http") if "http" in url_list else ""
-        final_url = join(SUCURI_BASE_API_URL, *url_list)
-        return final_url
-
-    def _process_url_output(self, url, out_res):
-        """Process the URL Scan output. This is the meat of the utility.
-
-        :param url: The URL being scanned
-        :param out_res: Response to extract
-        """
-        skip_list = [
-            '', 'Knowledgebase', 'Privacy', 'Request Cleanup', 'See our policy>>', 'Sign up',
-            'Sucuri Blog Learn about the latest malware hacks and DDoS attacks.',
-            'Sucuri Labs The place where we publicly archive all the malware we find.',
-            'Support', 'Terms', 'Website Backups', 'Website Firewall',
-            'Website Monitoring', 'submit a support request']
-        try:
-            stats = {"uniqCountries": out_res["stats"]["uniqCountries"],
-                     "totalLinks": out_res["stats"]["totalLinks"],
-                     "malicious": out_res["stats"]["malicious"],
-                     "adBlocked": out_res["stats"]["adBlocked"]}
-            black_list_status = False
-            black_list = [" ".join(_["text"].split()) for _ in out_res["data"]["links"]]
-            black_list.sort()
-            self._clean_up_link_list(
-                skip_list=skip_list, black_list=black_list)
-            for _ in black_list:
-                if "Domain blacklisted by" in _:
-                    black_list_status = True
-                    break
-            result = {
-                "url": url,
-                "stats": stats,
-                "is_malicious": stats["malicious"] or black_list_status,
-                "blacklist_info": black_list
-            }
-            self.scan_results["urls"].append(result)
-
-            if result["is_malicious"]:
-                LOGGER.warning(f"Possible threat detected in URL: {url}")
-            else:
-                LOGGER.info(f"No threats detected for URL: {url}")
-        except KeyError as _error:
-            LOGGER.exception("%s", _error)
-
-    def _post_submission_api(self, final_url):
-        headers = {'Content-Type': 'application/json', 'API-Key': self.url_scan_key}
-        data = {'url': final_url, 'visibility': 'public'}
-        try:
-            response = requests.post(join(URL_SCAN_API_BASE_URL, "scan"), headers=headers, json=data)
-            response.raise_for_status()
-            return response.json().get("uuid")
-        except (requests.RequestException, KeyError) as e:
-            LOGGER.error(f"Failed to submit URL for scanning: {e}")
-            return None
-
-    def _get_result_api(self, uuid):
-        result_url = join(URL_SCAN_API_BASE_URL, "result", str(uuid))
-        try:
-            response = requests.get(result_url)
-            # urlscan.io might return a 404 if the scan is not complete, so we loop
-            while response.status_code == 404:
-                LOGGER.info("Scan results not ready yet, waiting...")
-                time.sleep(10)
-                response = requests.get(result_url)
-
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            LOGGER.error(f"Failed to retrieve scan results: {e}")
-            return None
-
-
-
-    @staticmethod
-    def _clean_up_link_list(skip_list, black_list):
-        """Modify the black list array in place by removing
-         the common items from the black list that are also in the skip list
-
-        :param skip_list: list of items to be skipped
-        :param black_list: list of black listed items
-        :return: None
-        """
-        sl_i = 0
-        bl_i = 0
-        """
-        sl = ["ab", "cd", "ef", "gg", "hh", "zz"]
-        bl = ["ab", "ef", "xx", "yy", "zz"]
-        """
-        while sl_i < len(skip_list) and bl_i < len(black_list):
-            if skip_list[sl_i] < black_list[bl_i]:
-                sl_i += 1
-            elif skip_list[sl_i] > black_list[bl_i]:
-                bl_i += 1
-            else:
-                black_list.pop(bl_i)
-                sl_i += 1
+        self.scan_hashes()
 
 
 def parse_args(arguments):
@@ -241,9 +222,12 @@ def parse_args(arguments):
 
     help_text = "Enter the URLScan API Key by registering on http://urlscan.io"
     arg_parser.add_argument("-k1", "--url_scan_api_key", default="1db4aa53-a668-49dc-be36-465d6755491f", type=str, help=help_text)
+    
+    help_text = "Enter the Phishtank API Key by registering on http://phishtank.com"
+    arg_parser.add_argument("-k2", "--phishtank_api_key", default="", type=str, help=help_text)
 
     help_text = "Enter your Gemini API Key for the final analysis report."
-    arg_parser.add_argument("-k2", "--gemini_api_key", type=str, help=help_text)
+    arg_parser.add_argument("-k3", "--gemini_api_key", type=str, help=help_text)
 
     # Verbose flag
     arg_parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose DEBUG logging")
@@ -266,6 +250,7 @@ def main(arguments):
         hashes=args.get("hashes"),
         url_scan_key=args.get("url_scan_api_key"),
         virus_total_key=args.get("vt_api_key"),
+        phishtank_api_key=args.get("phishtank_api_key"),
         gemini_api_key=args.get("gemini_api_key")
     )
 

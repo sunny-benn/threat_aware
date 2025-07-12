@@ -1,42 +1,84 @@
 import os
+import json
+from typing import Any, Dict, Optional, Union
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 
 
-def generate_ai_report(analysis_data, gemini_api_key=None):
-    """Generates a human-readable security report using an LLM.
+def generate_ai_report(analysis_data: Dict[str, Any], gemini_api_key: Optional[str] = None) -> Union[Dict[str, Any], str]:
+    """Generate a narrative report AND a structured classification in a single LLM call.
 
     Args:
-        analysis_data (dict): A dictionary containing all the collected evidence.
-        openai_api_key (str, optional): The OpenAI API key. Defaults to env variable.
+        analysis_data: Collected evidence dict (URLs, hashes, ML prediction, VT/Sucuri/PhishTank, etc.).
+        gemini_api_key: Optional override for GEMINI_API_KEY env var.
 
     Returns:
-        str: The AI-generated report.
+        Dict with keys {"analysis_text", "classification"} on success; otherwise a plain error string.
     """
     api_key = gemini_api_key or os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return "Error: GEMINI_API_KEY not found. Please set it as an environment variable."
 
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",  # cost-effective fast model
+        model="gemini-2.0-flash",
         google_api_key=api_key,
-        temperature=0.5,
-        max_output_tokens=512,
+        temperature=0.2,
+        max_output_tokens=1024,
     )
 
-    # Construct a detailed prompt with all the evidence
-    prompt = f"""You are a friendly cybersecurity expert explaining a potentially malicious email to a non-technical user. 
-    Based on the following technical data, write a simple, clear, and concise report. 
-    Start with a one-sentence summary (e.g., 'This email looks safe,' or 'This email is suspicious and likely a phishing attempt.').
-    Then, explain the key findings in bullet points. For each finding, explain what it means in simple terms.
-    Finally, provide a clear recommendation on what the user should do next (e.g., 'delete this email immediately' or 'it's safe to reply').
+    schema_example = {
+        "analysis_text": "string - succinct narrative suitable for end users",
+        "classification": {
+            "overall_status": "safe|warning|danger",
+            "status_line": "one-sentence summary",
+            "recommendation": "actionable next step",
+            "cards": [
+                {
+                    "category": "Machine Learning Prediction",
+                    "severity": "safe|warning|danger",
+                    "subtitle": "optional short subtitle",
+                    "description": "short explanation"
+                }
+            ]
+        }
+    }
 
-    Here is the technical data:
-    {analysis_data}
-    """
+    prompt = (
+        "You are a careful cybersecurity assistant.\n"
+        "Given the following technical JSON input, produce a concise end-user narrative AND a strict JSON classification.\n"
+        "Rules:\n"
+        "- Reflect evidence faithfully.\n"
+        "- Single VirusTotal engine flag or a Sucuri 'C' rating => warning, not danger.\n"
+        "- 'Blocked from accessing' due to API/WAF/rate limits => warning.\n"
+        "- Blacklisted, browser/security blocked, multiple engines detecting, or cert issues => danger.\n"
+        "- Strong ML-benign with no hard-danger => safe.\n"
+        "Output ONLY JSON (no markdown) matching this schema: \n"
+        f"{json.dumps(schema_example, ensure_ascii=False)}\n\n"
+        f"Technical input: {json.dumps(analysis_data, ensure_ascii=False)}"
+    )
 
     try:
         response = llm.invoke(prompt)
-        return response.content if hasattr(response, "content") else str(response)
+        raw = response.content if hasattr(response, "content") else str(response)
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                obj = json.loads(raw[start:end+1])
+            else:
+                return raw
+
+        analysis_text = obj.get("analysis_text") or ""
+        classification = obj.get("classification") or {}
+        status = (classification.get("overall_status") or "").strip().lower()
+        if status not in {"safe", "warning", "danger"}:
+            classification = None
+
+        if classification and "cards" in classification and not isinstance(classification["cards"], list):
+            classification["cards"] = []
+
+        return {"analysis_text": analysis_text, "classification": classification}
     except Exception as e:
         return f"Error generating AI report: {e}"
