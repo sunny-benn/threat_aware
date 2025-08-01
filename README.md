@@ -28,7 +28,8 @@ pip3 install -r requirements.txt
 
 ```
 
-## URLScan.io
+## APIs used 
+### URLScan.io
 
 This utility uses sucuri.net (https://sitecheck.sucuri.net/) which is an accurate online malware scanner.
 
@@ -38,3 +39,8 @@ Navigate to http://urlscan.io and create a user account and under the user profi
 
 For more information, please read the following page for more details. https://urlscan.io/about-api/
 
+### Virus Total
+
+The second API used in this utility is Virus Total.
+VirusTotal inspects items with over 70 antivirus scanners and URL/domain blacklisting services, 
+in addition to a myriad of tools to extract signals from the studied content.

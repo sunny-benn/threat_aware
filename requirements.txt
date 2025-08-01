@@ -1,1 +1,8 @@
 # Add modules here
+requests
+mock
+pytest
+openai
+Flask
+langchain
+langchain-google-genai
