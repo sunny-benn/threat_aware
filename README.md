@@ -3,6 +3,12 @@
 Threat Aware is a utility written in Python to analyze online components, including 
 IP-address, URLs, files, ports, and hashes for vulnerability and/or compromise indications.
 
+## Features
+- ML phishing detection with robust feature engineering (`src/utils.py`) using `tldextract`, path normalization, `subdomain_abnormality`, `domain/subdomain` complexity, and `subdomain_label_count`.
+- Conservative heuristics reduce false positives for clean personal domains and alphabetic subdomains at root while returning both raw and adjusted probabilities (`src/threat_aware.py`).
+- External scanners: Sucuri SiteCheck, VirusTotal (URL & hash), and PhishTank (`src/scanners.py`).
+- AI Security Analysis (Gemini) with structured, styled frontend reports; LLM cards merged with synthesized scanner cards (hacker theme UI).
+
 ## Environment Setup
 ```shell script
 # Clone the repo
@@ -20,21 +26,52 @@ source venv/bin/activate
 pip3 install -r requirements.txt
 ```
 
+## CLI usage
+```bash
+# Always activate the venv first
+source venv/bin/activate
 
-## Run Scan
-```shell script
-# Execute scan
-./threat_aware.py -k1 $api_key --urls "http://www.google.com"
+# URL scan (Sucuri + VT + PhishTank + local ML + AI report)
+python src/threat_aware.py -v \
+  -k1 "$SUCURI_API_KEY" -k "$VT_API_KEY" -k2 "$PHISHTANK_API_KEY" -k3 "$GEMINI_API_KEY" \
+  --urls "https://www.google.com"
 
+# Hash scan (VirusTotal)
+python src/threat_aware.py -k "$VT_API_KEY" --hashes "<sha256>"
+
+# Analyze a raw email file (.eml)
+python src/threat_aware.py -v -k1 "$SUCURI_API_KEY" -k "$VT_API_KEY" -k2 "$PHISHTANK_API_KEY" -k3 "$GEMINI_API_KEY" \
+  --email-file sample_email.eml
 ```
 
-## URLScan.io
+## Web UI
+I have created a flask web app to serve the UI. This would be a good way to conviniently access the scanner from a browser. It is in the `src/web_app.py` file.
+```bash
+source venv/bin/activate
+export URL_SCAN_API_KEY=... VT_API_KEY=... PHISHTANK_API_KEY=... GEMINI_API_KEY=...
+python src/web_app.py
+# Open http://127.0.0.1:5000
+```
 
-This utility uses sucuri.net (https://sitecheck.sucuri.net/) which is an accurate online malware scanner.
+## Train the ML model
+```bash
+source venv/bin/activate
+python src/threat_analyzer.py
+# Outputs: phishing_model.joblib, model_features.joblib (project root)
+# ThreatAware loads these automatically if present.
+```
 
-In order to be able to run this utility (threat_scanner.py), you will need an API token from http://urlscan.io.
+## External services
+- Sucuri SiteCheck (URL scans): set `URL_SCAN_API_KEY` (web) or pass `-k1` (CLI).
+- VirusTotal (URL & hash): set `VT_API_KEY` (web) or pass `-k` (CLI).
+- PhishTank (URL reputation): set `PHISHTANK_API_KEY` (web) or pass `-k2` (CLI).
+- Gemini (AI analysis): set `GEMINI_API_KEY` (web) or pass `-k3` (CLI).
 
-Navigate to http://urlscan.io and create a user account and under the user profile setting, create an API-Token.
+## Frontend
+- UI: `templates/index.html`, styles in `static/hacker.css`.
+- The app renders structured AI reports with status badges and merges LLM output with scanner cards (VirusTotal, Sucuri, PhishTank, ML) for completeness.
 
-For more information, please read the following page for more details. https://urlscan.io/about-api/
-
+## Notes
+- Do not commit large model artifacts. `.gitignore` excludes `*.joblib`/`*.pkl`.
+- Prefer release assets, cloud storage, or Git LFS for large binaries.
+- Run tests: `source venv/bin/activate && python tests/test_ml_model.py`.

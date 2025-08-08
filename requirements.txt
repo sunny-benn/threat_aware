@@ -1,1 +1,9 @@
 # Add modules here
+requests
+mock
+pytest
+openai
+Flask
+langchain
+langchain-google-genai
+python-dotenv==1.1.1

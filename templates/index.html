@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Threat Aware - AI Phishing Analysis</title>
+    <!-- Matrix / Hacker theme -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='hacker.css') }}">
+    <!-- Minimal inline CSS for the progress overlay only; all other styles live in hacker.css -->
+    <style>
+        #progress-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: none; align-items: center; justify-content: center; z-index: 9999; }
+        .progress-container { width: 60%; background: #222; border-radius: 10px; overflow: hidden; height: 18px; border: 1px solid #00ff00; }
+        .progress-bar { height: 100%; width: 0%; background: rgba(0,255,0,0.6); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>AI-Powered Threat Analyzer</h1>
+        <p id="subheading"></p>
+        
+        <!-- Global progress overlay -->
+        <div id="progress-overlay">
+            <div class="progress-container">
+                <div class="progress-bar"></div>
+            </div>
+        </div>
+
+        <!-- Scan-type selector -->
+        <div style="margin: 1rem 0;">
+            <label for="scan-type">Choose scan type:</label>
+            <select id="scan-type" class="text-input">
+                <option value="email">Email (.eml)</option>
+                <option value="url">URL</option>
+                <option value="hash">File Hash</option>
+            </select>
+        </div>
+
+        <!-- Email Scan Form -->
+        <div class="form-section" data-section="email">
+            <h2>Email Analysis</h2>
+            <form action="/analyze" method="post" enctype="multipart/form-data">
+                <label for="email_file" class="upload-form" id="upload-label">
+                    Click to select or drag & drop your .eml file here.
+                </label>
+                <input type="file" name="email_file" id="email_file" accept=".eml" required>
+                <label style="display:block; margin-top:0.5rem;">
+                    <input type="checkbox" name="verbose" value="1"> Verbose logs
+                </label>
+                <button type="submit" class="btn">Analyze Email</button>
+            </form>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <!-- Direct URL Scan Form -->
+        <div class="form-section" data-section="url">
+            <h2>Scan a URL</h2>
+            <form action="/scan_url" method="post">
+                <input type="url" name="url_input" placeholder="https://example.com/phish" class="text-input" required>
+                <label style="display:block; margin-top:0.5rem;">
+                    <input type="checkbox" name="verbose" value="1"> Verbose logs
+                </label>
+                <button type="submit" class="btn" style="margin-top:1rem;">Analyze URL</button>
+            </form>
+        </div>
+
+        <!-- Direct Hash Scan Form -->
+        <div class="form-section" data-section="hash">
+            <h2>Scan a File Hash</h2>
+            <form action="/scan_hash" method="post">
+                <input type="text" name="hash_input" placeholder="SHA-256 hash" class="text-input" required minlength="64" maxlength="64">
+                <label style="display:block; margin-top:0.5rem;">
+                    <input type="checkbox" name="verbose" value="1"> Verbose logs
+                </label>
+                <button type="submit" class="btn" style="margin-top:1rem;">Analyze Hash</button>
+            </form>
+        </div>
+
+        <!-- Results Container (populated by JS) -->
+        <div id="results-container"></div>
+    </div>
+
+    <script>
+        function $(sel, root=document) { return root.querySelector(sel); }
+        function $all(sel, root=document) { return Array.from(root.querySelectorAll(sel)); }
+        let progressTimer = null;
+        function startProgress() {
+            const overlay = $('#progress-overlay');
+            const bar = $('.progress-bar');
+            if (!overlay || !bar) return;
+            overlay.style.display = 'flex';
+            let val = 0;
+            bar.style.width = '0%';
+            clearInterval(progressTimer);
+            progressTimer = setInterval(() => {
+                // ease to 92% max while loading
+                val = Math.min(92, val + Math.max(0.5, (100 - val) * 0.02));
+                bar.style.width = val.toFixed(1) + '%';
+            }, 100);
+        }
+        function completeProgress() {
+            const overlay = $('#progress-overlay');
+            const bar = $('.progress-bar');
+            if (!overlay || !bar) return;
+            clearInterval(progressTimer);
+            bar.style.width = '100%';
+            setTimeout(() => {
+                overlay.style.display = 'none';
+                bar.style.width = '0%';
+            }, 250);
+        }
+
+        // Toggle visible form by scan type
+        function updateSectionVisibility(value) {
+            $all('.form-section').forEach(sec => {
+                sec.style.display = (sec.getAttribute('data-section') === value) ? 'block' : 'none';
+            });
+            const sub = $('#subheading');
+            const SUBTEXT = {
+                email: 'Upload a raw email file (.eml) to analyze it for threats.',
+                url: 'Enter a URL to analyze for phishing indicators.',
+                hash: 'Paste a SHA-256 file hash to check reputation.'
+            };
+            if (sub) sub.textContent = SUBTEXT[value] || '';
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const selector = $('#scan-type');
+            selector.value = 'email';
+            updateSectionVisibility(selector.value);
+            selector.addEventListener('change', (e) => updateSectionVisibility(e.target.value));
+
+            const uploadInput = $('#email_file');
+            const uploadLabel = $('#upload-label');
+            if (uploadInput && uploadLabel) {
+                uploadInput.addEventListener('change', function() {
+                    if (this.files && this.files.length > 0) {
+                        uploadLabel.textContent = `File selected: ${this.files[0].name}`;
+                    }
+                });
+            }
+
+            // Intercept all forms to fetch JSON and render results without navigating
+            $all('.form-section form').forEach(form => {
+                form.addEventListener('submit', async (ev) => {
+                    ev.preventDefault();
+                    startProgress();
+                    try {
+                        const fd = new FormData(form);
+                        const res = await fetch(form.action, { method: 'POST', body: fd, headers: { 'Accept': 'application/json' } });
+                        if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+                        const data = await res.json();
+                        renderResults(data);
+                    } catch (err) {
+                        renderReport(`Error: ${err.message || err}`);
+                    } finally {
+                        completeProgress();
+                    }
+                });
+            });
+        });
+
+        // Decide whether to render structured classification or fallback to heuristic text parsing
+        function renderResults(data) {
+            const cls = data && data.classification;
+            const analysisText = (data && data.analysis_text) || '';
+            const scanResults = data && data.scan_results;
+            if (cls && typeof cls === 'object') {
+                const status = (cls.overall_status || '').toLowerCase();
+                if (['safe','warning','danger'].includes(status)) {
+                    return renderStructured(cls, analysisText, scanResults);
+                }
+            }
+            // Fallback to heuristic rendering
+            const text = (data && (data.report || data.analysis_text)) || 'No report available.';
+            renderReport(text);
+        }
+
+        // Render from structured classification JSON returned by backend
+        function renderStructured(classification, analysisText, scanResults) {
+            const type = (classification.overall_status || 'warning').toLowerCase();
+            const label = type === 'danger' ? 'Unsafe' : type === 'safe' ? 'Safe' : 'Potentially Unsafe';
+            const icon = type === 'danger' ? '❌' : type === 'safe' ? '🛡️' : '⚠️';
+
+            const root = document.createElement('div');
+            root.className = 'threat-report';
+
+            const header = document.createElement('div');
+            header.className = 'report-header';
+            const h2 = document.createElement('h2'); h2.textContent = '🤖 AI Security Analysis';
+            const badge = document.createElement('span');
+            badge.className = `status-badge status-${type}`;
+            badge.textContent = `${icon} ${label}`;
+            header.appendChild(h2); header.appendChild(badge);
+            root.appendChild(header);
+
+            const content = document.createElement('div');
+            content.className = 'report-content';
+
+            // Summary section
+            const summary = document.createElement('div');
+            summary.className = 'analysis-summary';
+            const sH3 = document.createElement('h3'); sH3.textContent = '📊 Analysis Summary';
+            const sP = document.createElement('p'); sP.textContent = (classification.status_line || '').trim() || (analysisText || '').trim() || 'Summary not provided.';
+            summary.appendChild(sH3); summary.appendChild(sP);
+            // Optional narrative paragraph
+            if (analysisText && analysisText.trim() && !sP.textContent.includes(analysisText.trim())) {
+                const nP = document.createElement('p'); nP.textContent = analysisText.trim();
+                summary.appendChild(nP);
+            }
+            content.appendChild(summary);
+
+            // Cards grid: merge LLM cards with synthesized cards from raw scans
+            const cards = Array.isArray(classification.cards) ? [...classification.cards] : [];
+            const synth = synthesizeCardsFromScanResults(scanResults);
+            if (synth.length) {
+                // Deduplicate by category using relaxed matching (regex by source)
+                const hasCat = (regex) => cards.some(c => (c.category || '').toLowerCase().match(regex));
+                synth.forEach(c => {
+                    const cat = (c.category || '').toLowerCase();
+                    const regex = /virus/.test(cat) ? /virus|vt/ : /phish/.test(cat) ? /phish|tank/ : /sucuri/.test(cat) ? /sucuri/ : /machine|ml/.test(cat) ? /machine|ml/ : new RegExp(cat);
+                    if (!hasCat(regex)) cards.push(c);
+                });
+            }
+            if (cards.length) {
+                const grid = document.createElement('div');
+                grid.className = 'card-grid';
+                const iconFor = (cat) => (/ml/i.test(cat) ? '🧠' : /virus|vt/i.test(cat) ? '🧪' : /sucuri/i.test(cat) ? '🔍' : /phish|tank/i.test(cat) ? '🐟' : '📌');
+                cards.forEach(c => {
+                    const card = document.createElement('div');
+                    card.className = 'result-card';
+                    const sev = (c.severity || '').toLowerCase();
+                    if (['danger','warning','safe'].includes(sev)) card.classList.add(sev);
+                    const category = c.category || 'Analysis';
+                    const h4 = document.createElement('h4'); h4.textContent = `${iconFor(category)} ${category}`;
+                    const sub = document.createElement('div'); sub.className = 'card-subtitle'; sub.textContent = c.subtitle || '';
+                    const p = document.createElement('p'); p.textContent = c.description || '';
+                    card.appendChild(h4);
+                    if (c.subtitle) card.appendChild(sub);
+                    if (c.description) card.appendChild(p);
+                    grid.appendChild(card);
+                });
+                content.appendChild(grid);
+            }
+
+            // Recommendation banner
+            const recText = (classification.recommendation || '').trim();
+            if (recText) {
+                const rec = document.createElement('div');
+                rec.className = `recommendation status-${type}`;
+                const rH3 = document.createElement('h3'); rH3.textContent = '💡 Recommendation';
+                const rP = document.createElement('p'); rP.textContent = recText;
+                rec.appendChild(rH3); rec.appendChild(rP);
+                content.appendChild(rec);
+            }
+
+            root.appendChild(content);
+            const container = $('#results-container');
+            container.innerHTML = '';
+            container.appendChild(root);
+            root.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        // Build cards from raw scan_results to ensure coverage when the LLM omits sources
+        function synthesizeCardsFromScanResults(scanResults) {
+            try {
+                if (!scanResults) return [];
+                const out = [];
+                const firstUrl = Array.isArray(scanResults.urls) && scanResults.urls.length ? scanResults.urls[0] : null;
+                const firstHash = Array.isArray(scanResults.hashes) && scanResults.hashes.length ? scanResults.hashes[0] : null;
+
+                // Machine Learning card (URL)
+                if (firstUrl && firstUrl.ml_prediction) {
+                    const ml = firstUrl.ml_prediction;
+                    // ml.probability is phishing probability string like "21.20%"
+                    const pct = parseFloat(String(ml.probability || '').replace('%','')) || 0;
+                    let sev = 'safe';
+                    if ((ml.prediction || '').toLowerCase() === 'phishing') sev = pct >= 70 ? 'danger' : 'warning';
+                    const benignPct = Math.max(0, 100 - pct).toFixed(2);
+                    out.push({
+                        category: 'Machine Learning Prediction',
+                        severity: sev,
+                        subtitle: `Phishing probability: ${pct.toFixed(2)}%` + (ml.prediction ? ` (${ml.prediction})` : ''),
+                        description: `Model indicates ~${benignPct}% likelihood of benign.`
+                    });
+                }
+
+                // VirusTotal card (URL)
+                const addVTCard = (vt, label) => {
+                    if (!vt) return;
+                    const mal = Number(vt.malicious || 0);
+                    const susp = Number(vt.suspicious || 0);
+                    let sev = 'safe';
+                    if (mal >= 2 || (mal >= 1 && susp >= 1)) sev = 'danger';
+                    else if (mal === 1 || susp > 0) sev = 'warning';
+                    const sub = `Malicious: ${mal}, Suspicious: ${susp}`;
+                    const desc = vt.link ? `${label} results available (see VirusTotal report).` : `${label} results summarized.`;
+                    out.push({ category: 'VirusTotal', severity: sev, subtitle: sub, description: desc });
+                };
+                if (firstUrl && firstUrl.virustotal) addVTCard(firstUrl.virustotal, 'URL');
+                if (firstHash && firstHash.virustotal) addVTCard(firstHash.virustotal, 'Hash');
+
+                // PhishTank card (URL)
+                if (firstUrl && firstUrl.phishtank) {
+                    const pt = firstUrl.phishtank;
+                    let sev = 'safe';
+                    let desc = '';
+                    if (pt.error) { sev = 'warning'; desc = String(pt.error); }
+                    else {
+                        const s = JSON.stringify(pt).toLowerCase();
+                        if (/in_database\":\s*true/.test(s) || /valid\":\s*true/.test(s)) { sev = 'danger'; desc = 'URL reported as phishing in PhishTank.'; }
+                        else desc = 'No phishing report found in PhishTank.';
+                    }
+                    out.push({ category: 'PhishTank', severity: sev, subtitle: '', description: desc });
+                }
+
+                // Sucuri card fallback if present but LLM omitted
+                if (firstUrl && firstUrl.sucuri) {
+                    const su = firstUrl.sucuri;
+                    let sev = 'safe';
+                    let desc = '';
+                    if (su.error) { sev = 'warning'; desc = String(su.error); }
+                    else {
+                        const s = JSON.stringify(su).toLowerCase();
+                        if (/malware|blacklist|phishing|defacement/.test(s)) { sev = 'danger'; desc = 'Sucuri indicates potential compromise indicators.'; }
+                        else desc = 'Sucuri scan did not indicate active malware; minor issues may still exist.';
+                    }
+                    out.push({ category: 'Sucuri Scan', severity: sev, subtitle: '', description: desc });
+                }
+
+                return out;
+            } catch (e) {
+                return [];
+            }
+        }
+
+        function formatAIReport(text) {
+            const lines = (text || '').split('\n');
+            const trim = s => (s || '').trim();
+            const getStatus = () => {
+                const ln = lines.map(l => l.trim());
+                const joined = ln.filter(Boolean).join(' \n ');
+                let statusLine = ln.find(l => /(appears to be safe|safe to proceed|appears unsafe|is unsafe|is dangerous|phishing attempt)/i.test(l)) || '';
+                const recIndex = ln.findIndex(l => /^Recommendation:?/i.test(l));
+                let rec = '';
+                if (recIndex !== -1) {
+                    const tail = ln.slice(recIndex + 1).filter(Boolean);
+                    if (tail.length) rec = tail.join(' ');
+                }
+                const safeSignals = /(appears\s+to\s+be\s+safe|safe\s+to\s+proceed|no\s+indication\s+of\s+malicious|clean\b|no\s+major\s+issues|benign|likely\s+safe)/i;
+                const oneSourceFlag = /(one\s+source\s+flagged|1\s+source\s+flagged)/i;
+                const softUnsafeText = /(\bis\s+unsafe\b|\bis\s+dangerous\b)/i;
+                const blacklisted = /(blacklist|blacklisted)/i;
+                const blockedDanger = /blocked\s+(?:by\s+(?:browser|chrome|safebrowsing|security|isp|network|provider|hosting|firewall)|as\s+(?:malicious|phishing)|for\s+security\s+reasons)/i;
+                const blockedSoft = /blocked\s+from\s+accessing|request\s+blocked|blocked\s+by\s+(?:api|service|waf|rate\s*limit|captcha)/i;
+                const certIssues = /(expired\s+tls|expired\s+certificate|invalid\s+certificate)/i;
+                const multiFlag = /(many|multiple|several)\s+(?:engines|sources).*(?:malicious|detected)/i;
+                const confirmedPhish = /(confirmed\s+phishing|phishing\s+attempt(?!\s*indicators)|credential\s*harvesting)/i;
+
+                const sentences = joined.split(/[.!?\n]+/).map(s => s.trim());
+                const containsNegatedMalicious = sentences.some(s => /malicious/i.test(s) && /(no\s|not\s|without\s|didn['’]?t\s(?:find|detect)\s)/i.test(s));
+
+                const hasHardDanger = (blacklisted.test(joined) || blockedDanger.test(joined) || certIssues.test(joined) || multiFlag.test(joined) || confirmedPhish.test(joined)) && !containsNegatedMalicious;
+                const hasSoftOnly = softUnsafeText.test(joined) && !hasHardDanger;
+                const hasOneFlag = oneSourceFlag.test(joined);
+                const hasSoftBlocked = blockedSoft.test(joined);
+
+                let type = 'warning', label = 'Potentially Unsafe', icon = '⚠️';
+                if (hasHardDanger) { type = 'danger'; label = 'Unsafe'; icon = '❌'; }
+                else if (hasSoftOnly && (hasOneFlag || safeSignals.test(joined))) { type = 'warning'; label = 'Potentially Unsafe'; icon = '⚠️'; }
+                else if (safeSignals.test(joined)) { type = 'safe'; label = 'Safe'; icon = '🛡️'; }
+                else if (hasSoftOnly || hasOneFlag || hasSoftBlocked) { type = 'warning'; label = 'Potentially Unsafe'; icon = '⚠️'; }
+
+                if (!statusLine) {
+                    statusLine = type === 'danger'
+                        ? 'This URL is unsafe.'
+                        : type === 'safe'
+                            ? 'This URL appears to be safe.'
+                            : 'This URL may be risky.';
+                }
+
+                // Fallback one-line recommendation if the section is missing/empty
+                if (!rec || rec.replace(/\*|\*/g, '').trim().length < 5) {
+                    rec = type === 'danger'
+                        ? 'Do not proceed. Close the site and report it to security.'
+                        : type === 'safe'
+                            ? 'Safe to proceed. Exercise normal caution.'
+                            : 'Proceed with extreme caution. Avoid entering credentials.';
+                }
+
+                return { type, label, icon, statusLine, rec };
+            };
+
+            // Extract bullet points (categories) – support *, -, and emoji bullets
+            const bulletRegex = /^\s*(?:\*+|-|•|●|▪|▶|👉|🧠|🧪|🔍|🐟|📌)\s/;
+            const bullets = lines.filter(l => bulletRegex.test(l.trim()));
+            const items = bullets.map(b => {
+                const cleaned = b.replace(bulletRegex, '').trim();
+                const m = cleaned.match(/\*\*(.+?)\*\*\s*(.*)/); // **Title** Rest
+                let title = 'Analysis', rest = cleaned;
+                if (m) { title = trim(m[1]); rest = trim(m[2]); }
+                // Derive category and subtitle
+                let category = title, subtitle = '';
+                if (title.includes(':')) {
+                    const idx = title.indexOf(':');
+                    category = trim(title.slice(0, idx));
+                    subtitle = trim(title.slice(idx + 1)).replace(/:$/,'');
+                }
+                const icon = /ml/i.test(category) ? '🧠' : /virus|vt/i.test(category) ? '🧪' : /sucuri/i.test(category) ? '🔍' : /phish|tank/i.test(category) ? '🐟' : '📌';
+                return { category, subtitle, description: rest, icon };
+            });
+
+            const root = document.createElement('div');
+            root.className = 'threat-report';
+
+            const header = document.createElement('div');
+            header.className = 'report-header';
+            const h2 = document.createElement('h2'); h2.textContent = '🤖 AI Security Analysis';
+            const status = getStatus();
+            const badge = document.createElement('span');
+            badge.className = `status-badge status-${status.type}`;
+            badge.textContent = `${status.icon} ${status.label}`;
+            header.appendChild(h2); header.appendChild(badge);
+            root.appendChild(header);
+
+            const content = document.createElement('div');
+            content.className = 'report-content';
+
+            const summary = document.createElement('div');
+            summary.className = 'analysis-summary';
+            const sH3 = document.createElement('h3'); sH3.textContent = '📊 Analysis Summary';
+            const sP = document.createElement('p'); sP.textContent = status.statusLine;
+            summary.appendChild(sH3); summary.appendChild(sP);
+            content.appendChild(summary);
+
+            if (items.length) {
+                const grid = document.createElement('div');
+                grid.className = 'card-grid';
+
+                const assessSeverity = (t) => {
+                    const s = (t || '').toLowerCase();
+                    const negMal = /(no\s|not\s|without\s|didn['’]?t\s(?:find|detect)\s)(?:any\s)?malicious/;
+                    const multiFlag = /(many|multiple|several)\s+(?:engines|sources).*(?:malicious|detected)/;
+                    const danger = /(blacklist|blacklisted|unsafe\b|dangerous|confirmed\s+phishing|phishing\s+attempt(?!\s*indicators)|blocked\s+(?:by\s+(?:browser|chrome|safebrowsing|security|isp|network|provider|hosting|firewall)|as\s+(?:malicious|phishing)|for\s+security\s+reasons)|not\s+secure|compromised|credential|harvest|steal|expired\s+tls|expired\s+certificate|invalid\s+certificate)/;
+                    const warnOnly = /(one\s+source\s+flagged|1\s+source\s+flagged|flagged.*malicious|suspicious|unable\s+to\s+check|timeout|rate\s*limit|inconclusive|unknown|\bc\W*rating\b|blocked\s+from\s+accessing|request\s+blocked|blocked\s+by\s+(?:api|service|waf|rate\s*limit|captcha))/;
+                    const safe = /(benign|clean\b|no\s+major\s+issues|no\s+indication\s+of\s+malicious|harmless|undetected)/;
+                    if (multiFlag.test(s) || (danger.test(s) && !negMal.test(s))) return 'danger';
+                    if (warnOnly.test(s)) return 'warning';
+                    if (safe.test(s)) return 'safe';
+                    return 'neutral';
+                };
+
+                items.forEach(it => {
+                    const card = document.createElement('div');
+                    card.className = 'result-card';
+                    const h4 = document.createElement('h4'); h4.textContent = `${it.icon} ${it.category}`;
+                    const sub = document.createElement('div'); sub.className = 'card-subtitle'; sub.textContent = it.subtitle;
+                    const p = document.createElement('p'); p.textContent = it.description;
+
+                    // Apply severity styling per card
+                    const sev = assessSeverity(`${it.category} ${it.subtitle} ${it.description}`);
+                    if (sev === 'danger') card.classList.add('danger');
+                    else if (sev === 'warning') card.classList.add('warning');
+                    else if (sev === 'safe') card.classList.add('safe');
+
+                    card.appendChild(h4);
+                    if (it.subtitle) card.appendChild(sub);
+                    if (it.description) card.appendChild(p);
+                    grid.appendChild(card);
+                });
+                content.appendChild(grid);
+            }
+
+            if (status.rec) {
+                const rec = document.createElement('div');
+                rec.className = `recommendation status-${status.type}`;
+                const rH3 = document.createElement('h3'); rH3.textContent = '💡 Recommendation';
+                const rP = document.createElement('p'); rP.textContent = status.rec;
+                rec.appendChild(rH3); rec.appendChild(rP);
+                content.appendChild(rec);
+            }
+
+            root.appendChild(content);
+            return root;
+        }
+
+        function renderReport(text) {
+            const container = $('#results-container');
+            let node = null;
+            try {
+                node = formatAIReport(text);
+            } catch (e) {
+                const wrapper = document.createElement('div');
+                wrapper.className = 'results';
+                const pre = document.createElement('pre');
+                const code = document.createElement('code');
+                code.textContent = text || '';
+                pre.appendChild(code);
+                wrapper.appendChild(pre);
+                node = wrapper;
+            }
+            container.innerHTML = '';
+            container.appendChild(node);
+            node.scrollIntoView({ behavior: 'smooth' });
+        }
+    </script>
+</body>
+</html>
