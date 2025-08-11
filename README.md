@@ -79,13 +79,10 @@ python src/threat_analyzer.py
 - PhishTank (URL reputation): set `PHISHTANK_API_KEY` (web) or pass `-k2` (CLI).
 - Gemini (AI analysis): set `GEMINI_API_KEY` (web) or pass `-k3` (CLI).
 
-<<<<<<< Updated upstream
-=======
 Note: 
  - You will have to obtain API keys for VirusTotal, Sucuri, PhishTank and Gemini to run this app locally.
  - I will be deploying this application to a public server and will be making it available as a web app.
 
->>>>>>> Stashed changes
 ## Frontend
 - UI: `templates/index.html`, styles in `static/hacker.css`.
 - The app renders structured AI reports with status badges and merges LLM output with scanner cards (VirusTotal, Sucuri, PhishTank, ML) for completeness.
