@@ -1,5 +1,6 @@
 # Threat Aware
 
+<<<<<<< Updated upstream
 Threat Aware is a utility written in Python to analyze online components, including 
 IP-address, URLs, files, ports, and hashes for vulnerability and/or compromise indications.
 
@@ -8,6 +9,28 @@ IP-address, URLs, files, ports, and hashes for vulnerability and/or compromise i
 - Conservative heuristics reduce false positives for clean personal domains and alphabetic subdomains at root while returning both raw and adjusted probabilities (`src/threat_aware.py`).
 - External scanners: Sucuri SiteCheck, VirusTotal (URL & hash), and PhishTank (`src/scanners.py`).
 - AI Security Analysis (Gemini) with structured, styled frontend reports; LLM cards merged with synthesized scanner cards (hacker theme UI).
+=======
+AI & LLM-powered security toolkit with phishing detection, multi-source scanning, and contextual analysis. 
+
+Threat Aware is a toolkit that analyzes URLs, file hashes, and raw .eml emails for signs of compromise by combining machine learning models, large language models (LLMs), and external threat intelligence feeds to deliver actionable, human-readable security insights.
+
+## Features
+- Phishing URL Detection (Custom ML Model)
+  - Trained with robust feature engineering (tldextract, path normalization, subdomain entropy, label count)
+  - Conservative heuristics to reduce false positives (personal domains, clean subdomains)
+  - Outputs both raw and adjusted probabilities
+- Multi-Source External Scanning
+  - Sucuri SiteCheck (URL malware/blacklist check)
+  - VirusTotal (URL + hash scanning)
+  - PhishTank (URL reputation database)
+- LLM-Driven Threat Reports (Gemini)
+  - Converts raw scan results into structured, readable security summaries
+  - Merges AI reasoning with scanner outputs in a styled “hacker theme” dashboard
+  - Few-shot prompting for classification & root-cause explanation
+- Flask Web App Interface
+  - View scans in real time with structured cards for ML, LLM, and scanners
+  - Supports API keys via environment variables
+>>>>>>> Stashed changes
 
 ## Environment Setup
 ```shell script
@@ -67,6 +90,13 @@ python src/threat_analyzer.py
 - PhishTank (URL reputation): set `PHISHTANK_API_KEY` (web) or pass `-k2` (CLI).
 - Gemini (AI analysis): set `GEMINI_API_KEY` (web) or pass `-k3` (CLI).
 
+<<<<<<< Updated upstream
+=======
+Note: 
+ - You will have to obtain API keys for VirusTotal, Sucuri, PhishTank and Gemini to run this app locally.
+ - I will be deploying this application to a public server and will be making it available as a web app.
+
+>>>>>>> Stashed changes
 ## Frontend
 - UI: `templates/index.html`, styles in `static/hacker.css`.
 - The app renders structured AI reports with status badges and merges LLM output with scanner cards (VirusTotal, Sucuri, PhishTank, ML) for completeness.
