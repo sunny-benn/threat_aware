@@ -1,15 +1,5 @@
 # Threat Aware
 
-<<<<<<< Updated upstream
-Threat Aware is a utility written in Python to analyze online components, including 
-IP-address, URLs, files, ports, and hashes for vulnerability and/or compromise indications.
-
-## Features
-- ML phishing detection with robust feature engineering (`src/utils.py`) using `tldextract`, path normalization, `subdomain_abnormality`, `domain/subdomain` complexity, and `subdomain_label_count`.
-- Conservative heuristics reduce false positives for clean personal domains and alphabetic subdomains at root while returning both raw and adjusted probabilities (`src/threat_aware.py`).
-- External scanners: Sucuri SiteCheck, VirusTotal (URL & hash), and PhishTank (`src/scanners.py`).
-- AI Security Analysis (Gemini) with structured, styled frontend reports; LLM cards merged with synthesized scanner cards (hacker theme UI).
-=======
 AI & LLM-powered security toolkit with phishing detection, multi-source scanning, and contextual analysis. 
 
 Threat Aware is a toolkit that analyzes URLs, file hashes, and raw .eml emails for signs of compromise by combining machine learning models, large language models (LLMs), and external threat intelligence feeds to deliver actionable, human-readable security insights.
@@ -30,7 +20,6 @@ Threat Aware is a toolkit that analyzes URLs, file hashes, and raw .eml emails f
 - Flask Web App Interface
   - View scans in real time with structured cards for ML, LLM, and scanners
   - Supports API keys via environment variables
->>>>>>> Stashed changes
 
 ## Environment Setup
 ```shell script
